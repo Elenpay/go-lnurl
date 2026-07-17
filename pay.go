@@ -21,13 +21,16 @@ var (
 	TRUE  *bool = &t
 )
 
-func CallPay(
+// CallPay performs the LNURL-pay callback request using the client's HTTP client.
+// It returns the HTTP status code alongside the pay values so callers can distinguish
+// server errors (5xx) from protocol errors (invalid JSON, wrong amount, etc.).
+func (c *LNURLClient) CallPay(
 	metadata string,
 	callback *url.URL,
 	msats int64,
 	comment string,
 	payerdata *PayerDataValues,
-) (*LNURLPayValues, error) {
+) (statusCode int, values *LNURLPayValues, err error) {
 	qs := callback.Query()
 	qs.Set("amount", strconv.FormatInt(msats, 10))
 
@@ -43,43 +46,45 @@ func CallPay(
 	}
 
 	callback.RawQuery = qs.Encode()
-	resp, err := actualClient.Get(callback.String())
+	resp, err := c.httpClient.Get(callback.String())
 	if err != nil {
-		return nil, fmt.Errorf("http error calling '%s': %w", callback.String(), err)
+		return 0, nil, fmt.Errorf("http error calling '%s': %w", callback.String(), err)
 	}
 	defer resp.Body.Close()
 
-	var values LNURLPayValues
+	statusCode = resp.StatusCode
+
 	b, _ := io.ReadAll(resp.Body)
-	if err := json.Unmarshal(b, &values); err != nil {
-		return nil, fmt.Errorf("got invalid JSON from '%s': %w (%s)",
+	var result LNURLPayValues
+	if err := json.Unmarshal(b, &result); err != nil {
+		return statusCode, nil, fmt.Errorf("got invalid JSON from '%s': %w (%s)",
 			callback.String(), err, string(b))
 	}
 
-	if values.Status == "ERROR" {
-		return nil, LNURLErrorResponse{
-			Status: values.Status,
-			Reason: values.Reason,
+	if result.Status == "ERROR" {
+		return statusCode, nil, LNURLErrorResponse{
+			Status: result.Status,
+			Reason: result.Reason,
 			URL:    callback,
 		}
 	}
 
-	inv, err := decodepay.Decodepay(values.PR)
+	inv, err := decodepay.Decodepay(result.PR)
 	if err != nil {
-		return nil, fmt.Errorf("error parsing invoice '%s': %w", values.PR, err)
+		return statusCode, nil, fmt.Errorf("error parsing invoice '%s': %w", result.PR, err)
 	}
 
-	values.ParsedInvoice = inv
-	values.PayerDataJSON = payerdataJSON
+	result.ParsedInvoice = inv
+	result.PayerDataJSON = payerdataJSON
 
 	if int64(inv.MSatoshi) != msats {
-		return nil, fmt.Errorf("got invoice with wrong amount (wanted %d, got %d)",
+		return statusCode, nil, fmt.Errorf("got invoice with wrong amount (wanted %d, got %d)",
 			msats,
 			inv.MSatoshi,
 		)
 	}
 
-	return &values, nil
+	return statusCode, &result, nil
 }
 
 func Action(text string, url string) *SuccessAction {
@@ -222,7 +227,9 @@ func (sa *SuccessAction) Decipher(preimage []byte) (content string, err error) {
 
 func (_ LNURLPayParams) LNURLKind() string { return "lnurl-pay" }
 
-func HandlePay(raw []byte) (LNURLParams, error) {
+// HandlePay parses and normalises a raw LNURL-pay params response body.
+// It does not make any HTTP calls.
+func (c *LNURLClient) HandlePay(raw []byte) (*LNURLPayParams, error) {
 	var params LNURLPayParams
 	err := json.Unmarshal(raw, &params)
 	if err != nil {
@@ -230,10 +237,10 @@ func HandlePay(raw []byte) (LNURLParams, error) {
 	}
 
 	if err := params.Normalize(); err != nil {
-		return params, err
+		return nil, err
 	}
 
-	return params, nil
+	return &params, nil
 }
 
 func (params *LNURLPayParams) Normalize() error {
@@ -268,13 +275,11 @@ func (params *LNURLPayParams) Normalize() error {
 		}
 	}
 
-	// parse url
 	callbackURL, err := url.Parse(params.Callback)
 	if err != nil {
 		return errors.New("callback is not a valid URL")
 	}
 
-	// add random nonce to avoid caches
 	qs := callbackURL.Query()
 	qs.Set("__n", strconv.FormatInt(time.Now().Unix(), 10))
 	callbackURL.RawQuery = qs.Encode()
@@ -283,42 +288,43 @@ func (params *LNURLPayParams) Normalize() error {
 	return nil
 }
 
-func (params LNURLPayParams) Call(
+func (c *LNURLClient) Call(
+	params LNURLPayParams,
 	msats int64,
 	comment string,
 	payerdata *PayerDataValues,
-) (*LNURLPayValues, error) {
+) (int, *LNURLPayValues, error) {
 	if params.PayerData == nil || !params.PayerData.Exists() {
 		payerdata = nil
 	} else {
 		if params.PayerData.Email != nil &&
 			params.PayerData.Email.Mandatory &&
 			(payerdata == nil || payerdata.Email == "") {
-			return nil, fmt.Errorf("email is mandatory")
+			return 0, nil, fmt.Errorf("email is mandatory")
 		}
 		if params.PayerData.LightningAddress != nil &&
 			params.PayerData.LightningAddress.Mandatory &&
 			(payerdata == nil || payerdata.LightningAddress == "") {
-			return nil, fmt.Errorf("lightning address is mandatory")
+			return 0, nil, fmt.Errorf("lightning address is mandatory")
 		}
 		if params.PayerData.FreeName != nil &&
 			params.PayerData.FreeName.Mandatory &&
 			(payerdata == nil || payerdata.FreeName == "") {
-			return nil, fmt.Errorf("name is mandatory")
+			return 0, nil, fmt.Errorf("name is mandatory")
 		}
 		if params.PayerData.PubKey != nil &&
 			params.PayerData.PubKey.Mandatory &&
 			(payerdata == nil || payerdata.PubKey == "") {
-			return nil, fmt.Errorf("pubkey is mandatory")
+			return 0, nil, fmt.Errorf("pubkey is mandatory")
 		}
 		if params.PayerData.KeyAuth != nil &&
 			params.PayerData.KeyAuth.Mandatory &&
 			(payerdata == nil || payerdata.KeyAuth == nil) {
-			return nil, fmt.Errorf("auth is mandatory")
+			return 0, nil, fmt.Errorf("auth is mandatory")
 		}
 	}
 
-	return CallPay(
+	return c.CallPay(
 		params.MetadataEncoded(),
 		params.CallbackURL(),
 		msats,

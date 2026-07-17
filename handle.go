@@ -13,7 +13,7 @@ import (
 // string or calls the URL to get the parameters.
 // Returns a different struct for each of the lnurl subprotocols, the .LNURLKind() method of
 // which should be checked next to see how the wallet is going to proceed.
-func HandleLNURL(rawlnurl string) (string, LNURLParams, error) {
+func (c *LNURLClient) HandleLNURL(rawlnurl string) (string, LNURLParams, error) {
 	var err error
 	var rawurl string
 
@@ -67,7 +67,7 @@ func HandleLNURL(rawlnurl string) (string, LNURLParams, error) {
 		}
 	}
 
-	resp, err := actualClient.Get(rawurl)
+	resp, err := c.httpClient.Get(rawurl)
 	if err != nil {
 		return rawurl, nil, err
 	}
@@ -91,7 +91,7 @@ func HandleLNURL(rawlnurl string) (string, LNURLParams, error) {
 		value, err := HandleWithdraw(b)
 		return rawurl, value, err
 	case "payRequest":
-		value, err := HandlePay(b)
+		value, err := c.HandlePay(b)
 		return rawurl, value, err
 	case "channelRequest":
 		value, err := HandleChannel(b)
