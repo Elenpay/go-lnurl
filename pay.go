@@ -30,7 +30,7 @@ func (c *LNURLClient) CallPay(
 	msats int64,
 	comment string,
 	payerdata *PayerDataValues,
-) (statusCode int, values *LNURLPayValues, err error) {
+) (int, *LNURLPayValues, error) {
 	qs := callback.Query()
 	qs.Set("amount", strconv.FormatInt(msats, 10))
 
@@ -40,7 +40,10 @@ func (c *LNURLClient) CallPay(
 
 	var payerdataJSON string
 	if payerdata != nil {
-		j, _ := json.Marshal(payerdata)
+		j, err := json.Marshal(payerdata)
+		if err != nil {
+			return 0, nil, fmt.Errorf("marshalling payerdata: %w", err)
+		}
 		payerdataJSON = string(j)
 		qs.Set("payerdata", payerdataJSON)
 	}
@@ -50,11 +53,18 @@ func (c *LNURLClient) CallPay(
 	if err != nil {
 		return 0, nil, fmt.Errorf("http error calling '%s': %w", callback.String(), err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			c.logger.Error("failed to close response body", "error", err)
+		}
+	}()
 
-	statusCode = resp.StatusCode
+	statusCode := resp.StatusCode
 
-	b, _ := io.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB max
+	if err != nil {
+		return statusCode, nil, fmt.Errorf("error reading response from '%s': %w", callback.String(), err)
+	}
 	var result LNURLPayValues
 	if err := json.Unmarshal(b, &result); err != nil {
 		return statusCode, nil, fmt.Errorf("got invalid JSON from '%s': %w (%s)",
@@ -225,10 +235,11 @@ func (sa *SuccessAction) Decipher(preimage []byte) (content string, err error) {
 	return string(plaintext), nil
 }
 
-func (_ LNURLPayParams) LNURLKind() string { return "lnurl-pay" }
+func (LNURLPayParams) LNURLKind() string { return "lnurl-pay" }
 
 // HandlePay parses and normalises a raw LNURL-pay params response body.
-// It does not make any HTTP calls.
+// It does not use the client's HTTP client — the method receiver exists for API
+// symmetry so callers interact with all LNURL operations through one type.
 func (c *LNURLClient) HandlePay(raw []byte) (*LNURLPayParams, error) {
 	var params LNURLPayParams
 	err := json.Unmarshal(raw, &params)

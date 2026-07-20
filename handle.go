@@ -71,8 +71,13 @@ func (c *LNURLClient) HandleLNURL(rawlnurl string) (string, LNURLParams, error) 
 	if err != nil {
 		return rawurl, nil, err
 	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			c.logger.Error("failed to close response body", "error", err)
+		}
+	}()
 
-	b, err := io.ReadAll(resp.Body)
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB max
 	if err != nil {
 		return rawurl, nil, err
 	}

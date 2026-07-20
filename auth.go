@@ -17,7 +17,7 @@ type LNURLAuthParams struct {
 	Host        string   `json:"host"`
 }
 
-func (_ LNURLAuthParams) LNURLKind() string { return "lnurl-auth" }
+func (LNURLAuthParams) LNURLKind() string { return "lnurl-auth" }
 
 // VerifySignature takes the hex-encoded parameters passed to an lnurl-login endpoint and verifies
 // the signature against the key and challenge.
