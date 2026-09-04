@@ -26,11 +26,32 @@ func WithLogger(handler slog.Handler) Option {
 	return func(c *LNURLClient) { c.logger = slog.New(handler) }
 }
 
+// WithAllowedHosts exempts the given hostnames from the private/reserved IP
+// check performed by the SSRF-safe transport built by New. Use it only for
+// hosts you control that legitimately resolve to internal addresses (e.g. a
+// test lightning address server running in-cluster), and never in production.
+// Matching is case-insensitive on the hostname only, port excluded.
+func WithAllowedHosts(hosts ...string) Option {
+	return func(c *LNURLClient) {
+		for _, h := range hosts {
+			h = strings.ToLower(strings.TrimSpace(h))
+			if h == "" {
+				continue
+			}
+			if c.allowedHosts == nil {
+				c.allowedHosts = make(map[string]struct{})
+			}
+			c.allowedHosts[h] = struct{}{}
+		}
+	}
+}
+
 // LNURLClient makes LNURL requests using the provided HTTP client.
 // Use New for production (SSRF-safe) or NewWithClient/NewWithDefaultClient for dev/test.
 type LNURLClient struct {
-	httpClient *http.Client
-	logger     *slog.Logger
+	httpClient   *http.Client
+	logger       *slog.Logger
+	allowedHosts map[string]struct{}
 }
 
 func newClient(httpClient *http.Client, opts []Option) *LNURLClient {
@@ -47,15 +68,19 @@ func newClient(httpClient *http.Client, opts []Option) *LNURLClient {
 
 // New returns an LNURLClient with an SSRF-safe HTTP transport that blocks
 // connections to private/reserved IP ranges via net.Dialer.Control and
-// disables proxy forwarding to prevent proxy-based bypass.
+// disables proxy forwarding to prevent proxy-based bypass. Hosts passed to
+// WithAllowedHosts are exempt from the private/reserved IP check.
 // .onion addresses are routed through TorClient when set.
 func New(opts ...Option) (*LNURLClient, error) {
-	httpClient, err := newSafeHTTPClient()
+	c := newClient(nil, opts)
+
+	httpClient, err := newSafeHTTPClient(c.allowedHosts)
 	if err != nil {
 		return nil, err
 	}
+	c.httpClient = httpClient
 
-	return newClient(httpClient, opts), nil
+	return c, nil
 }
 
 // NewWithClient returns an LNURLClient using the provided http.Client.
@@ -77,14 +102,14 @@ func (c *LNURLClient) HTTPClient() *http.Client {
 	return c.httpClient
 }
 
-func newSafeHTTPClient() (*http.Client, error) {
+func newSafeHTTPClient(allowedHosts map[string]struct{}) (*http.Client, error) {
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return nil, errors.New("go-lnurl: http.DefaultTransport is not *http.Transport; cannot clone for SSRF-safe client")
 	}
 
 	t := base.Clone()
-	t.DialContext = newSafeDialContext(buildPrivateIPRanges())
+	t.DialContext = newSafeDialContext(buildPrivateIPRanges(), allowedHosts)
 	t.Proxy = nil
 
 	return &http.Client{Transport: onioncapableTransport{clearnet: t}}, nil
@@ -114,7 +139,11 @@ func buildPrivateIPRanges() []*net.IPNet {
 // newSafeDialContext returns a DialContext function that uses net.Dialer.Control
 // to validate resolved IPs before TCP connection. Control fires after DNS
 // resolution but before the TCP handshake, preventing DNS-rebinding attacks.
-func newSafeDialContext(privateRanges []*net.IPNet) func(context.Context, string, string) (net.Conn, error) {
+func newSafeDialContext(privateRanges []*net.IPNet, allowedHosts map[string]struct{}) func(context.Context, string, string) (net.Conn, error) {
+	allowedDialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
 	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -136,7 +165,28 @@ func newSafeDialContext(privateRanges []*net.IPNet) func(context.Context, string
 		},
 	}
 
-	return dialer.DialContext
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if isAllowedHost(addr, allowedHosts) {
+			return allowedDialer.DialContext(ctx, network, addr)
+		}
+
+		return dialer.DialContext(ctx, network, addr)
+	}
+}
+
+// isAllowedHost reports whether the hostname in addr ("host:port") was
+// explicitly allowlisted via WithAllowedHosts.
+func isAllowedHost(addr string, allowedHosts map[string]struct{}) bool {
+	if len(allowedHosts) == 0 {
+		return false
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	_, ok := allowedHosts[strings.ToLower(host)]
+
+	return ok
 }
 
 func isPrivateIP(ip net.IP, privateRanges []*net.IPNet) bool {
