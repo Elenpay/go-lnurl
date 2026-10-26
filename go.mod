@@ -1,6 +1,6 @@
-module github.com/Elenpay/go-lnurl
+module github.com/lunar-rails/go-lnurl
 
-go 1.26.4
+go 1.26.10
 
 require (
 	github.com/btcsuite/btcd/btcec/v2 v2.3.3
