@@ -1,4 +1,4 @@
-module github.com/Elenpay/go-lnurl
+module github.com/lunar-rails/ep-go-lnurl
 
 go 1.26.4
 
